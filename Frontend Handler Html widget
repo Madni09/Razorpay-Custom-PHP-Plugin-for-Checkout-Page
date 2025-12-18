@@ -1,0 +1,146 @@
+<script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+    
+    // --- 1. Form Data Scraper ---
+    function getFormData() {
+        function val(sel) {
+            const el = document.querySelector(sel);
+            return el ? el.value.trim() : '';
+        }
+        
+        // Scrape fields (Elementor IDs or Placeholders)
+        let name = val('#name') || val('#form-field-name') || val('[name="form_fields[name]"]') || val('input[placeholder*="Name" i]');
+        let email = val('#email') || val('#form-field-email') || val('[name="form_fields[email]"]') || val('input[type="email"]');
+        let phone = val('#phone') || val('#form-field-phone') || val('[name="form_fields[phone]"]') || val('input[type="tel"]');
+
+        if(phone) phone = phone.replace(/\D/g, ''); // Digits only
+
+        return { name, email, phone };
+    }
+
+    // --- 2. Build Payload (Includes User Data now) ---
+    function getPricingPayload(formData) {
+        const bump1 = document.getElementById('extraOffer'); 
+        const extra198 = (bump1 && bump1.checked) ? 197 : 0;
+
+        const bump2 = document.getElementById('extraOffer199');
+        const extra199 = (bump2 && bump2.checked) ? 197 : 0;
+
+        return { 
+            extra198, 
+            extra199,
+            // Pass user details to backend so they are saved in Order Notes
+            name: formData.name,
+            email: formData.email,
+            phone: formData.phone
+        };
+    }
+
+    // --- 3. API Calls ---
+    async function createRazorpayOrder(formData) {
+        const payload = getPricingPayload(formData);
+        
+        const response = await fetch('/wp-json/rzp-mini/v1/order', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.message || 'Order creation failed');
+        return data;
+    }
+
+    async function verifyPaymentOnServer(paymentData) {
+        const response = await fetch('/wp-json/rzp-mini/v1/verify', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(paymentData)
+        });
+        return await response.json();
+    }
+
+    // --- 4. Main Click Handler ---
+    const btn = document.getElementById('rzp-button');
+    
+    if (btn) {
+        btn.addEventListener('click', async function (e) {
+            e.preventDefault();
+            
+            const form = getFormData();
+            if (!form.name || !form.email || !form.phone || form.phone.length < 10) {
+                alert('⚠️ Please fill in your Name, Email, and valid Phone Number.');
+                return;
+            }
+
+            // UX: Disable button
+            const originalText = btn.innerText;
+            btn.innerText = 'Processing...';
+            btn.style.opacity = '0.7';
+            btn.style.pointerEvents = 'none';
+
+            try {
+                // Create Order (Server side)
+                const order = await createRazorpayOrder(form);
+
+                // Open Razorpay
+                const options = {
+                    key: 'rzp_test_x5HQ', // REPLACE WITH LIVE KEY ID
+                    amount: order.amount, 
+                    currency: order.currency,
+                    name: 'Career Branding Masterclass',
+                    description: 'Webinar Registration',
+                    order_id: order.id,
+                    
+                    // 1. PREFILL: Fills the visible fields in the popup
+                    prefill: {
+                        name: form.name,
+                        email: form.email,
+                        contact: form.phone
+                    },
+
+                    // 2. NOTES: Sent hidden to Pabbly/Webhook (CRITICAL FIX)
+                    notes: {
+                        name: form.name,
+                        email: form.email,
+                        phone: form.phone,
+                        product: 'Career Branding Masterclass'
+                    },
+
+                    theme: { color: '#1A237E' },
+                    handler: async function (response) {
+                        btn.innerText = 'Verifying...';
+                        const verification = await verifyPaymentOnServer(response);
+                        if (verification.ok) {
+                            window.location.href = 'https://brand.sakshichandraakar.in/thank-you-page-sunday/';
+                        } else {
+                            alert('❌ Verification failed. Contact support.');
+                            resetBtn();
+                        }
+                    },
+                    modal: { ondismiss: resetBtn }
+                };
+
+                const rzp = new Razorpay(options);
+                rzp.on('payment.failed', function (resp){
+                    alert('❌ Payment Failed: ' + resp.error.description);
+                    resetBtn();
+                });
+                rzp.open();
+
+            } catch (err) {
+                console.error(err);
+                alert('⚠️ Error: ' + err.message);
+                resetBtn();
+            }
+
+            function resetBtn() {
+                btn.innerText = originalText;
+                btn.style.opacity = '1';
+                btn.style.pointerEvents = 'auto';
+            }
+        });
+    }
+});
+</script>
