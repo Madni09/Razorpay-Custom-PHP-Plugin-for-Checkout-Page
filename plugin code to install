@@ -1,0 +1,113 @@
+<?php
+/**
+ * Plugin Name: RZP Mini (Pabbly Fix)
+ * Description: Optimized Razorpay checkout. Sends Customer Details in Notes for Pabbly/Zapier automation.
+ * Version: 1.2
+ * Author: Brainsoon
+ */
+
+if (!defined('ABSPATH')) exit;
+
+add_action('rest_api_init', function () {
+    register_rest_route('rzp-mini/v1', '/order', array(
+        'methods'  => 'POST',
+        'callback' => 'rzp_mini_create_order',
+        'permission_callback' => '__return_true'
+    ));
+
+    register_rest_route('rzp-mini/v1', '/verify', array(
+        'methods'  => 'POST',
+        'callback' => 'rzp_mini_verify',
+        'permission_callback' => '__return_true'
+    ));
+});
+
+function rzp_mini_env() {
+    return array(
+        // REPLACE WITH LIVE KEYS
+        'key_id'     => 'rzp_test_5HQ', 
+        'key_secret' => '318' 
+    );
+}
+
+function rzp_mini_create_order($req) {
+    $env = rzp_mini_env();
+    
+    if (empty($env['key_id']) || empty($env['key_secret'])) {
+        return new WP_REST_Response(array('error' => 'Server keys missing'), 500);
+    }
+
+    $p = $req->get_json_params();
+    if (!is_array($p)) $p = array();
+
+    // 1. Pricing Logic
+    $base_price = 51; 
+    $bump1_price = (!empty($p['extra198']) && $p['extra198'] > 0) ? 197 : 0;
+    $bump2_price = (!empty($p['extra199']) && $p['extra199'] > 0) ? 197 : 0;
+
+    $amount_paise = ($base_price + $bump1_price + $bump2_price) * 100; 
+
+    // 2. Capture Customer Details for Pabbly (Notes)
+    // We sanitize these to ensure clean data in your dashboard/webhook
+    $n_name  = isset($p['name']) ? sanitize_text_field($p['name']) : '';
+    $n_email = isset($p['email']) ? sanitize_email($p['email']) : '';
+    $n_phone = isset($p['phone']) ? sanitize_text_field($p['phone']) : '';
+
+    $receipt = 'rcpt_' . uniqid();
+
+    $payload = array(
+        'amount'          => $amount_paise,
+        'currency'        => 'INR',
+        'receipt'         => $receipt,
+        'payment_capture' => 1,
+        'notes'           => array(
+            'product' => 'Career Branding Masterclass',
+            'name'    => $n_name,  // <--- Restored for Pabbly
+            'email'   => $n_email, // <--- Restored for Pabbly
+            'phone'   => $n_phone  // <--- Restored for Pabbly
+        )
+    );
+
+    $auth = base64_encode($env['key_id'] . ':' . $env['key_secret']);
+    $args = array(
+        'headers' => array(
+            'Authorization' => 'Basic ' . $auth,
+            'Content-Type'  => 'application/json'
+        ),
+        'body'    => wp_json_encode($payload),
+        'timeout' => 30
+    );
+
+    $response = wp_remote_post('https://api.razorpay.com/v1/orders', $args);
+
+    if (is_wp_error($response)) {
+        return new WP_REST_Response(array('error' => $response->get_error_message()), 500);
+    }
+
+    $body = wp_remote_retrieve_body($response);
+    $data = json_decode($body, true);
+
+    if (isset($data['id'])) {
+        return new WP_REST_Response($data, 200);
+    } else {
+        error_log("RZP Order Failed: " . $body);
+        return new WP_REST_Response(array('error' => 'Razorpay Error', 'details' => $data), 500);
+    }
+}
+
+function rzp_mini_verify($req) {
+    $env = rzp_mini_env();
+    $p = $req->get_json_params();
+
+    $order_id   = isset($p['razorpay_order_id']) ? sanitize_text_field($p['razorpay_order_id']) : '';
+    $payment_id = isset($p['razorpay_payment_id']) ? sanitize_text_field($p['razorpay_payment_id']) : '';
+    $signature  = isset($p['razorpay_signature']) ? sanitize_text_field($p['razorpay_signature']) : '';
+
+    $generated_signature = hash_hmac('sha256', $order_id . '|' . $payment_id, $env['key_secret']);
+
+    if (hash_equals($generated_signature, $signature)) {
+        return new WP_REST_Response(array('ok' => true), 200);
+    } else {
+        return new WP_REST_Response(array('ok' => false), 400);
+    }
+}
